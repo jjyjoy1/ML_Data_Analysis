@@ -1,0 +1,37 @@
+#I used to use mothur software to process gene size sequences analysis
+#The mothur software is one of metagenomics software, which provide powerful functions to process nt and aa sequences analysis
+
+
+$module load mothur/1.48.0
+
+#Covid-19 sequences was download from GISAID.
+#As example for 05232022 data
+#Due to the header of sequence contains a space, mothur will read header mistake, so bash script to replace space to underdash. 
+cat spikenuc0523.fasta | sed -e 's/ /_/g' > spikenuc0523.nsp.fasta
+
+#Basic statistical sequences information
+summary.seqs(fasta=spikenuc0523.nsp.fasta)
+
+#Remove sequences with too many N, the length of spike is about 3822 nt. So I set maxn is 400(10%) 
+screen.seqs(fasta=spikenuc0523.nsp.fasta, maxn=400, start=1, end=3822)
+
+#Remove duplicated sequences
+unique.seqs(fasta=spikenuc0523.nsp.good.fasta)
+
+#Because the file is alinment sequences, so either chop all sequences to same length, or add N to the end of sequences file
+chop.seqs(fasta=spikeenuc0523.nsp.good.unique.fasta)
+
+#so the final sequences would be:
+#spikeenuc0523.nsp.good.unique.fasta
+
+
+#However, duee to too many good quility Covid-19 sequences, the clustering the globe Covid sequence pipeline failed to build distance distance. 
+
+
+
+
+
+
+
+
+
