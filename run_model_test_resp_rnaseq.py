@@ -71,14 +71,32 @@ def warning_format(message, category, filename, lineno, file=None, line=None):
 def load_dataset(dataset_file):
     dataset_name, file_extension = os.path.splitext(
         os.path.split(dataset_file)[1])
-    if not os.path.isfile(dataset_file) or file_extension.lower() != '.rds':
+    if not os.path.isfile(dataset_file) or file_extension.lower() != '.h5ad':
         raise IOError('File does not exist/invalid: {}'.format(dataset_file))
-    eset = r_base.readRDS(dataset_file)
-    X = pd.DataFrame(r_base.t(r_biobase.exprs(eset)),
-                     columns=r_biobase.featureNames(eset),
-                     index=r_biobase.sampleNames(eset))
-    sample_meta = r_biobase.pData(eset)
-    y = np.array(sample_meta['Class'], dtype=int)
+    
+    # Import AnnData
+    import anndata as ad
+    
+    # Load AnnData object
+    adata = ad.read_h5ad(dataset_file)
+    
+    # Extract expression matrix (X)
+    X = pd.DataFrame(adata.X, columns=adata.var_names, index=adata.obs_names)
+    
+    # Extract sample metadata (obs)
+    sample_meta = adata.obs.copy()
+    
+    # Extract feature metadata (var)
+    feature_meta = adata.var.copy()
+    
+    # Handle analysis type (survival or classification)
+    if analysis == 'surv':
+        from sksurv.util import Surv
+        y = Surv.from_dataframe('Status', 'Survival_in_days', sample_meta)
+    else:
+        y = np.array(sample_meta['Class'], dtype=int)
+    
+    # Handle groups and weights if present
     if 'Group' in sample_meta.columns:
         groups = np.array(sample_meta['Group'], dtype=int)
         _, group_indices, group_counts = np.unique(
@@ -93,36 +111,31 @@ def load_dataset(dataset_file):
         groups = None
         group_weights = None
         sample_weights = None
-    try:
-        feature_meta = r_biobase.fData(eset)
-        feature_meta_category_cols = (
-            feature_meta.select_dtypes(include='category').columns)
-        feature_meta[feature_meta_category_cols] = (
-            feature_meta[feature_meta_category_cols].astype(str))
-    except ValueError:
-        feature_meta = pd.DataFrame(index=r_biobase.featureNames(eset))
-    new_feature_names = []
+    
+    # Handle penalty factor metadata
     if penalty_factor_meta_col in feature_meta.columns:
         raise RuntimeError('{} column already exists in feature_meta'
-                           .format(penalty_factor_meta_col))
+                          .format(penalty_factor_meta_col))
     feature_meta[penalty_factor_meta_col] = 1
+    
+    # Process sample metadata columns to include in X
+    new_feature_names = []
     for sample_meta_col in sample_meta_cols:
         if sample_meta_col not in sample_meta.columns:
             raise RuntimeError('{} column does not exist in sample_meta'
-                               .format(sample_meta_col))
+                              .format(sample_meta_col))
         if sample_meta_col in X.columns:
             raise RuntimeError('{} column already exists in X'
-                               .format(sample_meta_col))
+                              .format(sample_meta_col))
+        
         is_category = (is_categorical_dtype(sample_meta[sample_meta_col])
-                       or is_object_dtype(sample_meta[sample_meta_col])
-                       or is_string_dtype(sample_meta[sample_meta_col]))
+                      or is_object_dtype(sample_meta[sample_meta_col])
+                      or is_string_dtype(sample_meta[sample_meta_col]))
+        
         if not is_category:
             X[sample_meta_col] = sample_meta[sample_meta_col]
             new_feature_names.append(sample_meta_col)
         elif sample_meta_col in ordinal_encoder_categories:
-            if sample_meta_col not in ordinal_encoder_categories:
-                raise RuntimeError('No ordinal encoder categories config '
-                                   'exists for {}'.format(sample_meta_col))
             if sample_meta[sample_meta_col].unique().size > 1:
                 ode = OrdinalEncoder(categories=[
                     ordinal_encoder_categories[sample_meta_col]])
@@ -135,7 +148,7 @@ def load_dataset(dataset_file):
                 sample_meta[sample_meta_col] != 'NA'].unique().size
             if num_categories > 2:
                 ohe_drop = (['NA'] if 'NA' in
-                            sample_meta[sample_meta_col].values else None)
+                           sample_meta[sample_meta_col].values else None)
                 ohe = OneHotEncoder(drop=ohe_drop, sparse=False)
                 ohe.fit(sample_meta[[sample_meta_col]])
                 new_sample_meta_cols = []
@@ -159,6 +172,8 @@ def load_dataset(dataset_file):
                 X[new_sample_meta_col] = ohe.transform(
                     sample_meta[[sample_meta_col]])
                 new_feature_names.append(new_sample_meta_col)
+    
+    # Create feature metadata for new columns
     new_feature_meta = pd.DataFrame(index=new_feature_names)
     for feature_meta_col in feature_meta.columns:
         if (is_categorical_dtype(feature_meta[feature_meta_col])
@@ -170,8 +185,10 @@ def load_dataset(dataset_file):
             new_feature_meta[feature_meta_col] = 0
         elif is_bool_dtype(feature_meta[feature_meta_col]):
             new_feature_meta[feature_meta_col] = False
+    
     new_feature_meta[penalty_factor_meta_col] = 0
     feature_meta = feature_meta.append(new_feature_meta, verify_integrity=True)
+    
     return (dataset_name, X, y, groups, group_weights, sample_weights,
             sample_meta, feature_meta)
 
@@ -188,15 +205,167 @@ def get_col_trf_col_grps(X, col_trf_pat_grps):
     return col_trf_col_grps
 
 
-def setup_pipe_and_param_grid(X):
+def setup_pipe_and_param_grid_rnaseq(X):
+    """
+    Set up the pipeline and parameter grid for RNA-seq data (ENSG patterns).
+    This function is extracted from the original setup_pipe_and_param_grid function
+    but only contains the parts relevant to RNA-seq data processing.
+    """
+    # Define parameter ranges
     clf_c = np.logspace(-5, 3, 9)
     l1_ratio = np.array([0.1, 0.3, 0.5, 0.7, 0.8, 0.9, 0.95, 0.99, 1.])
     skb_k = np.insert(np.linspace(2, 400, num=200, dtype=int), 0, 1)
-    sfm_c = (np.logspace(-2, 3, 6) if data_type == 'kraken' else
-             np.logspace(-2, 1, 4))
-    # drug response: svm-rfe
-    if args.model_type == 'rfe':
+    sfm_c = np.logspace(-2, 1, 4)  # for RNA-seq data
+    
+    # Import additional models for survival and classification
+    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+    from sksurv.ensemble import RandomSurvivalForest
+    from sksurv.svm import FastSurvivalSVM
+    
+    # Set up pipeline based on analysis type and model_type
+    # SURVIVAL ANALYSIS for RNA-seq data
+    if analysis == 'surv':
+        # Extract RNA-seq specific columns (ENSG patterns)
         col_trf_col_grps = get_col_trf_col_grps(X, [['^ENSG.+$']])
+        
+        if args.model_type == 'cnet':
+            # CoxNet model for RNA-seq
+            pipe = ExtendedPipeline(
+                memory=memory,
+                param_routing={'srv2': ['feature_meta'],
+                               'trf0': ['sample_meta']},
+                steps=[
+                    ('trf0', ExtendedColumnTransformer(
+                        n_jobs=1,
+                        param_routing={'trf0': ['sample_meta']},
+                        remainder='passthrough',
+                        transformers=[
+                            ('trf0', ExtendedPipeline(
+                                memory=memory,
+                                param_routing={'slr0': ['sample_meta'],
+                                               'trf1': ['sample_meta']},
+                                steps=[
+                                    ('slr0', EdgeRFilterByExpr(
+                                        is_classif=False)),
+                                    ('trf1', EdgeRTMMLogCPM(
+                                        prior_count=1))]),
+                             col_trf_col_grps[0][0])])),
+                    ('trf1', StandardScaler()),
+                    ('srv2', MetaCoxnetSurvivalAnalysis(
+                        estimator=CachedExtendedCoxnetSurvivalAnalysis(
+                            alpha_min_ratio=0.01, fit_baseline_model=True,
+                            max_iter=1000000, memory=memory, n_alphas=100,
+                            penalty_factor_meta_col=penalty_factor_meta_col,
+                            normalize=False, penalty_factor=None)))])
+            param_grid_dict = {'srv2__estimator__l1_ratio': l1_ratio}
+            
+        elif args.model_type == 'rsf':
+            # Random Survival Forest for RNA-seq
+            pipe = ExtendedPipeline(
+                memory=memory,
+                param_routing={'trf0': ['sample_meta']},
+                steps=[
+                    ('trf0', ExtendedColumnTransformer(
+                        n_jobs=1,
+                        param_routing={'trf0': ['sample_meta']},
+                        remainder='passthrough',
+                        transformers=[
+                            ('trf0', ExtendedPipeline(
+                                memory=memory,
+                                param_routing={'slr0': ['sample_meta'],
+                                               'trf1': ['sample_meta']},
+                                steps=[
+                                    ('slr0', EdgeRFilterByExpr(
+                                        is_classif=False)),
+                                    ('trf1', EdgeRTMMLogCPM(
+                                        prior_count=1))]),
+                             col_trf_col_grps[0][0])])),
+                    ('trf1', StandardScaler()),
+                    ('srv2', RandomSurvivalForest(
+                        n_estimators=100,
+                        min_samples_split=10,
+                        min_samples_leaf=5,
+                        max_features='sqrt',
+                        n_jobs=-1,
+                        random_state=random_seed))
+                ])
+            param_grid_dict = {
+                'srv2__n_estimators': [50, 100, 200],
+                'srv2__max_depth': [None, 5, 10, 15],
+                'srv2__min_samples_split': [5, 10, 15],
+                'srv2__min_samples_leaf': [3, 5, 10]
+            }
+            
+        elif args.model_type == 'svm':
+            # Survival SVM for RNA-seq
+            pipe = ExtendedPipeline(
+                memory=memory,
+                param_routing={'trf0': ['sample_meta']},
+                steps=[
+                    ('trf0', ExtendedColumnTransformer(
+                        n_jobs=1,
+                        param_routing={'trf0': ['sample_meta']},
+                        remainder='passthrough',
+                        transformers=[
+                            ('trf0', ExtendedPipeline(
+                                memory=memory,
+                                param_routing={'slr0': ['sample_meta'],
+                                               'trf1': ['sample_meta']},
+                                steps=[
+                                    ('slr0', EdgeRFilterByExpr(
+                                        is_classif=False)),
+                                    ('trf1', EdgeRTMMLogCPM(
+                                        prior_count=1))]),
+                             col_trf_col_grps[0][0])])),
+                    ('trf1', StandardScaler()),
+                    ('srv2', FastSurvivalSVM(
+                        alpha=1.0,
+                        rank_ratio=1.0,
+                        fit_intercept=True,
+                        max_iter=1000,
+                        random_state=random_seed))
+                ])
+            param_grid_dict = {
+                'srv2__alpha': np.logspace(-3, 3, 7),
+                'srv2__rank_ratio': [0.0, 0.5, 1.0]
+            }
+        else:
+            # Default to CoxNet if model_type isn't recognized
+            pipe = ExtendedPipeline(
+                memory=memory,
+                param_routing={'srv2': ['feature_meta'],
+                               'trf0': ['sample_meta']},
+                steps=[
+                    ('trf0', ExtendedColumnTransformer(
+                        n_jobs=1,
+                        param_routing={'trf0': ['sample_meta']},
+                        remainder='passthrough',
+                        transformers=[
+                            ('trf0', ExtendedPipeline(
+                                memory=memory,
+                                param_routing={'slr0': ['sample_meta'],
+                                               'trf1': ['sample_meta']},
+                                steps=[
+                                    ('slr0', EdgeRFilterByExpr(
+                                        is_classif=False)),
+                                    ('trf1', EdgeRTMMLogCPM(
+                                        prior_count=1))]),
+                             col_trf_col_grps[0][0])])),
+                    ('trf1', StandardScaler()),
+                    ('srv2', MetaCoxnetSurvivalAnalysis(
+                        estimator=CachedExtendedCoxnetSurvivalAnalysis(
+                            alpha_min_ratio=0.01, fit_baseline_model=True,
+                            max_iter=1000000, memory=memory, n_alphas=100,
+                            penalty_factor_meta_col=penalty_factor_meta_col,
+                            normalize=False, penalty_factor=None)))])
+            param_grid_dict = {'srv2__estimator__l1_ratio': l1_ratio}
+    
+    # DRUG RESPONSE MODELS for RNA-seq data
+    elif args.model_type == 'rfe':
+        # Extract RNA-seq specific columns (ENSG patterns)
+        col_trf_col_grps = get_col_trf_col_grps(X, [['^ENSG.+$']])
+        
+        # RFE-SVM for RNA-seq
         pipe = ExtendedPipeline(
             memory=memory,
             param_routing={'clf2': ['feature_meta', 'sample_weight'],
@@ -229,10 +398,12 @@ def setup_pipe_and_param_grid(X):
                     tuning_step=1))])
         param_grid_dict = {'clf2__estimator__C': clf_c,
                            'clf2__n_features_to_select': skb_k}
-    # drug response: elasticnet logistic regression
-    if args.model_type == 'lgr':
-        col_trf_col_grps = get_col_trf_col_grps(
-            X, [['^ENSG.+$', '^(?!ENSG).*$']])
+    
+    elif args.model_type == 'lgr':
+        # Extract RNA-seq specific columns (ENSG patterns)
+        col_trf_col_grps = get_col_trf_col_grps(X, [['^ENSG.+$']])
+        
+        # Logistic Regression for RNA-seq
         pipe = ExtendedPipeline(
             memory=memory,
             param_routing={'clf1': ['sample_weight'],
@@ -265,12 +436,7 @@ def setup_pipe_and_param_grid(X):
                                         solver='saga'),
                                     max_features=400,
                                     threshold=1e-10))]),
-                         col_trf_col_grps[0][0]),
-                        ('trf1', ExtendedPipeline(
-                            memory=memory,
-                            param_routing=None,
-                            steps=[('trf0', StandardScaler())]),
-                            col_trf_col_grps[0][1])])),
+                         col_trf_col_grps[0][0])])),
                 ('clf1', LogisticRegression(
                     class_weight='balanced',
                     max_iter=5000,
@@ -281,10 +447,120 @@ def setup_pipe_and_param_grid(X):
             'clf1__C': clf_c,
             'trf0__trf0__slr3__estimator__C': sfm_c,
             'trf0__trf0__slr3__estimator__l1_ratio': l1_ratio}
-    # drug response: limma/edgeR L2 logistic regression
-    if args.model_type == 'limma' or args.model_type == 'edgeR':
-        col_trf_col_grps = get_col_trf_col_grps(
-            X, [['^(?!gender_male|age_at_diagnosis|tumor_stage).*$']])
+    
+    elif args.model_type == 'rf':
+        # Extract RNA-seq specific columns (ENSG patterns)
+        col_trf_col_grps = get_col_trf_col_grps(X, [['^ENSG.+$']])
+        
+        # Random Forest for RNA-seq
+        pipe = ExtendedPipeline(
+            memory=memory,
+            param_routing={'trf0': ['sample_meta', 'sample_weight']},
+            steps=[
+                ('trf0', ExtendedColumnTransformer(
+                    n_jobs=1,
+                    param_routing={'trf0': ['sample_meta',
+                                            'sample_weight']},
+                    remainder='passthrough',
+                    transformers=[
+                        ('trf0', ExtendedPipeline(
+                            memory=memory,
+                            param_routing={'slr0': ['sample_meta'],
+                                           'slr3': ['sample_weight'],
+                                           'trf1': ['sample_meta']},
+                            steps=[
+                                ('slr0', EdgeRFilterByExpr(
+                                    is_classif=True)),
+                                ('trf1', EdgeRTMMLogCPM(
+                                    prior_count=1)),
+                                ('trf2', StandardScaler()),
+                                ('slr3', SelectFromModel(
+                                    estimator=CachedLogisticRegression(
+                                        class_weight='balanced',
+                                        max_iter=5000,
+                                        memory=memory,
+                                        penalty='elasticnet',
+                                        random_state=random_seed,
+                                        solver='saga'),
+                                    max_features=400,
+                                    threshold=1e-10))]),
+                         col_trf_col_grps[0][0])])),
+                ('clf1', RandomForestClassifier(
+                    class_weight='balanced',
+                    n_estimators=100,
+                    max_depth=None,
+                    min_samples_split=2,
+                    min_samples_leaf=1,
+                    n_jobs=-1,
+                    random_state=random_seed))])
+        param_grid_dict = {
+            'clf1__n_estimators': [50, 100, 200],
+            'clf1__max_depth': [None, 5, 10, 15],
+            'clf1__min_samples_split': [2, 5, 10],
+            'clf1__min_samples_leaf': [1, 2, 4],
+            'trf0__trf0__slr3__estimator__C': [0.1, 1.0],
+            'trf0__trf0__slr3__estimator__l1_ratio': [0.5, 0.7, 0.9]
+        }
+    
+    elif args.model_type == 'gb':
+        # Extract RNA-seq specific columns (ENSG patterns)
+        col_trf_col_grps = get_col_trf_col_grps(X, [['^ENSG.+$']])
+        
+        # Gradient Boosting for RNA-seq
+        pipe = ExtendedPipeline(
+            memory=memory,
+            param_routing={'trf0': ['sample_meta', 'sample_weight']},
+            steps=[
+                ('trf0', ExtendedColumnTransformer(
+                    n_jobs=1,
+                    param_routing={'trf0': ['sample_meta',
+                                            'sample_weight']},
+                    remainder='passthrough',
+                    transformers=[
+                        ('trf0', ExtendedPipeline(
+                            memory=memory,
+                            param_routing={'slr0': ['sample_meta'],
+                                           'slr3': ['sample_weight'],
+                                           'trf1': ['sample_meta']},
+                            steps=[
+                                ('slr0', EdgeRFilterByExpr(
+                                    is_classif=True)),
+                                ('trf1', EdgeRTMMLogCPM(
+                                    prior_count=1)),
+                                ('trf2', StandardScaler()),
+                                ('slr3', SelectFromModel(
+                                    estimator=CachedLogisticRegression(
+                                        class_weight='balanced',
+                                        max_iter=5000,
+                                        memory=memory,
+                                        penalty='elasticnet',
+                                        random_state=random_seed,
+                                        solver='saga'),
+                                    max_features=400,
+                                    threshold=1e-10))]),
+                         col_trf_col_grps[0][0])])),
+                ('clf1', GradientBoostingClassifier(
+                    n_estimators=100,
+                    learning_rate=0.1,
+                    max_depth=3,
+                    min_samples_split=2,
+                    min_samples_leaf=1,
+                    subsample=1.0,
+                    random_state=random_seed))])
+        param_grid_dict = {
+            'clf1__n_estimators': [50, 100, 200],
+            'clf1__learning_rate': [0.01, 0.1, 0.2],
+            'clf1__max_depth': [3, 5, 7],
+            'clf1__subsample': [0.8, 1.0],
+            'trf0__trf0__slr3__estimator__C': [0.1, 1.0],
+            'trf0__trf0__slr3__estimator__l1_ratio': [0.5, 0.7, 0.9]
+        }
+    
+    else:
+        # Extract RNA-seq specific columns (ENSG patterns)
+        col_trf_col_grps = get_col_trf_col_grps(X, [['^ENSG.+$']])
+        
+        # EdgeR model for RNA-seq as default
         pipe = ExtendedPipeline(
             memory=memory,
             param_routing={'clf2': ['sample_weight'],
@@ -297,12 +573,15 @@ def setup_pipe_and_param_grid(X):
                     transformers=[
                         ('trf0', ExtendedPipeline(
                             memory=memory,
-                            param_routing={'slr0': ['sample_meta']},
+                            param_routing={'slr0': ['sample_meta'],
+                                           'slr1': ['sample_meta']},
                             steps=[
-                                ('slr0', Limma(
+                                ('slr0', EdgeRFilterByExpr(
+                                    is_classif=True)),
+                                ('slr1', EdgeR(
                                     memory=memory,
-                                    robust=True,
-                                    trend=True))]),
+                                    prior_count=1,
+                                    robust=True))]),
                          col_trf_col_grps[0][0])])),
                 ('trf1', StandardScaler()),
                 ('clf2', LogisticRegression(
@@ -312,74 +591,50 @@ def setup_pipe_and_param_grid(X):
                     random_state=random_seed,
                     solver='saga'))])
         param_grid_dict = {'clf2__C': clf_c,
-                           'trf0__trf0__slr0__k': skb_k}
-    else:
-        col_trf_col_grps = get_col_trf_col_grps(
-            X, [['^(?!gender_male|age_at_diagnosis|tumor_stage).*$',
-                 '^(?:gender_male|age_at_diagnosis|tumor_stage)$'],
-                ['^ENSG.+$']])
-        pipe = ExtendedPipeline(
-            memory=memory,
-            param_routing={'clf1': ['sample_weight'],
-                           'trf0': ['sample_meta', 'sample_weight']},
-            steps=[
-                ('trf0', ExtendedColumnTransformer(
-                    n_jobs=1,
-                    param_routing={'trf0': ['sample_meta',
-                                            'sample_weight']},
-                    remainder='passthrough',
-                    transformers=[
-                        ('trf0', ExtendedPipeline(
-                            memory=memory,
-                            param_routing={'slr2': ['sample_weight'],
-                                           'trf0': ['sample_meta']},
-                            steps=[
-                                ('trf0', ExtendedColumnTransformer(
-                                    n_jobs=1,
-                                    param_routing={
-                                        'trf0': ['sample_meta']},
-                                    remainder='passthrough',
-                                    transformers=[
-                                        ('trf0', ExtendedPipeline(
-                                            memory=memory,
-                                            param_routing={
-                                                'slr0': ['sample_meta'],
-                                                'trf1': ['sample_meta']},
-                                            steps=[
-                                                ('slr0', EdgeRFilterByExpr(
-                                                    is_classif=True)),
-                                                ('trf1', EdgeRTMMLogCPM(
-                                                    prior_count=1))]),
-                                         col_trf_col_grps[1][0])])),
-                                ('trf1', StandardScaler()),
-                                ('slr2', SelectFromModel(
-                                    estimator=CachedLogisticRegression(
-                                        class_weight='balanced',
-                                        max_iter=5000,
-                                        memory=memory,
-                                        penalty='elasticnet',
-                                        random_state=random_seed,
-                                        solver='saga'),
-                                    max_features=400,
-                                    threshold=1e-10))]),
-                         col_trf_col_grps[0][0]),
-                        ('trf1', ExtendedPipeline(
-                            memory=memory,
-                            param_routing=None,
-                            steps=[('trf0', StandardScaler())]),
-                         col_trf_col_grps[0][1])])),
-                ('clf1', LogisticRegression(
-                    class_weight='balanced',
-                    max_iter=5000,
-                    penalty='l2',
-                    random_state=random_seed,
-                    solver='saga'))])
-        param_grid_dict = {
-            'clf1__C': clf_c,
-            'trf0__trf0__slr2__estimator__C': sfm_c,
-            'trf0__trf0__slr2__estimator__l1_ratio': l1_ratio}
+                           'trf0__trf0__slr1__k': skb_k}
+    
     param_grid = [param_grid_dict.copy()]
     return pipe, param_grid, param_grid_dict
+
+
+def handle_model_type(args, analysis):
+    """
+    Validate and adjust model type based on analysis type to ensure compatibility.
+    
+    Parameters:
+    -----------
+    args : argparse.Namespace
+        The command-line arguments
+    analysis : str
+        The analysis type ('surv' or 'resp')
+        
+    Returns:
+    --------
+    str
+        The validated/adjusted model type
+    """
+    # Define valid model types for each analysis
+    survival_models = ['cnet', 'rsf', 'svm']
+    response_models = ['rfe', 'lgr', 'edger', 'limma', 'rf', 'gb']
+    
+    # Handle survival analysis
+    if analysis == 'surv':
+        if args.model_type not in survival_models:
+            print(f"Warning: Model type '{args.model_type}' is not compatible with survival analysis.")
+            print(f"Using default survival model: 'cnet'")
+            return 'cnet'
+        return args.model_type
+    
+    # Handle drug response analysis
+    elif analysis == 'resp':
+        if args.model_type not in response_models:
+            print(f"Warning: Model type '{args.model_type}' is not compatible with drug response analysis.")
+            print(f"Using default response model: 'lgr'")
+            return 'lgr'
+        return args.model_type
+    
+    # For any other analysis type
+    return args.model_type
 
 
 def col_trf_info(col_trf):
@@ -647,7 +902,7 @@ def unset_pipe_memory(pipe):
 def run_model():
     (dataset_name, X, y, groups, group_weights, sample_weights, sample_meta,
      feature_meta) = load_dataset(args.dataset)
-    pipe, param_grid, param_grid_dict = setup_pipe_and_param_grid(X)
+    pipe, param_grid, param_grid_dict = setup_pipe_and_param_grid_rnaseq(X)
     pipe_has_penalty_factor = False
     for param in pipe.get_params(deep=True).keys():
         param_parts = param.split('__')
@@ -1178,6 +1433,27 @@ def dir_path(path):
     return path
 
 
+def update_parser_with_new_models(parser):
+    """
+    Update the existing argument parser to include the new model types
+    """
+    # Update the model-type choices to include new models
+    for action in parser._actions:
+        if action.dest == 'model_type':
+            # Save the existing help text
+            help_text = action.help
+            # Remove the old action
+            parser._actions.remove(action)
+            parser._option_string_actions.pop(action.option_strings[0])
+            # Add a new action with updated choices
+            parser.add_argument('--model-type', type=str, required=True,
+                                choices=['cnet', 'rfe', 'lgr', 'edger', 'limma', 
+                                         'rsf', 'svm', 'rf', 'gb'],
+                                help=help_text)
+            break
+    return parser
+
+
 parser = ArgumentParser()
 parser.add_argument('--dataset', type=str, required=True, help='dataset')
 parser.add_argument('--model-type', type=str, required=True,
@@ -1218,7 +1494,10 @@ parser.add_argument('--tmp-dir', type=dir_path, default=gettempdir(),
 parser.add_argument('--verbose', type=int, default=1, help='program verbosity')
 parser.add_argument('--load-only', default=False, action='store_true',
                     help='set up model selection and load dataset only')
+
+parser = update_parser_with_new_models(parser)
 args = parser.parse_args()
+args.model_type = handle_model_type(args, analysis)
 
 file_basename = os.path.splitext(os.path.split(args.dataset)[1])[0]
 _, cancer, analysis, target, data_type, *rest = file_basename.split('_')

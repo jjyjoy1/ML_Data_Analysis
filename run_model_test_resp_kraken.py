@@ -78,14 +78,25 @@ def warning_format(message, category, filename, lineno, file=None, line=None):
 def load_dataset(dataset_file):
     dataset_name, file_extension = os.path.splitext(
         os.path.split(dataset_file)[1])
-    if not os.path.isfile(dataset_file) or file_extension.lower() != '.rds':
+    if not os.path.isfile(dataset_file) or file_extension.lower() != '.h5ad':
         raise IOError('File does not exist/invalid: {}'.format(dataset_file))
-    eset = r_base.readRDS(dataset_file)
-    X = pd.DataFrame(r_base.t(r_biobase.exprs(eset)),
-                     columns=r_biobase.featureNames(eset),
-                     index=r_biobase.sampleNames(eset))
-    sample_meta = r_biobase.pData(eset)
-    y = np.array(sample_meta['Class'], dtype=int)
+    # Import AnnData
+    import anndata as ad   
+    # Load AnnData object
+    adata = ad.read_h5ad(dataset_file)
+    # Extract expression matrix (X)
+    X = pd.DataFrame(adata.X, columns=adata.var_names, index=adata.obs_names)
+    # Extract sample metadata (obs)
+    sample_meta = adata.obs.copy()
+    # Extract feature metadata (var)
+    feature_meta = adata.var.copy()
+    # Handle analysis type (survival or classification)
+    if analysis == 'surv':
+        from sksurv.util import Surv
+        y = Surv.from_dataframe('Status', 'Survival_in_days', sample_meta)
+    else:
+        y = np.array(sample_meta['Class'], dtype=int)
+    # Handle groups and weights if present
     if 'Group' in sample_meta.columns:
         groups = np.array(sample_meta['Group'], dtype=int)
         _, group_indices, group_counts = np.unique(
@@ -100,36 +111,28 @@ def load_dataset(dataset_file):
         groups = None
         group_weights = None
         sample_weights = None
-    try:
-        feature_meta = r_biobase.fData(eset)
-        feature_meta_category_cols = (
-            feature_meta.select_dtypes(include='category').columns)
-        feature_meta[feature_meta_category_cols] = (
-            feature_meta[feature_meta_category_cols].astype(str))
-    except ValueError:
-        feature_meta = pd.DataFrame(index=r_biobase.featureNames(eset))
-    new_feature_names = []
+    # Handle penalty factor metadata
     if penalty_factor_meta_col in feature_meta.columns:
         raise RuntimeError('{} column already exists in feature_meta'
-                           .format(penalty_factor_meta_col))
+                          .format(penalty_factor_meta_col))
     feature_meta[penalty_factor_meta_col] = 1
+    # Process sample metadata columns to include in X
+    new_feature_names = []
     for sample_meta_col in sample_meta_cols:
         if sample_meta_col not in sample_meta.columns:
             raise RuntimeError('{} column does not exist in sample_meta'
-                               .format(sample_meta_col))
+                              .format(sample_meta_col))
         if sample_meta_col in X.columns:
             raise RuntimeError('{} column already exists in X'
-                               .format(sample_meta_col))
+                              .format(sample_meta_col))
+        
         is_category = (is_categorical_dtype(sample_meta[sample_meta_col])
-                       or is_object_dtype(sample_meta[sample_meta_col])
-                       or is_string_dtype(sample_meta[sample_meta_col]))
+                      or is_object_dtype(sample_meta[sample_meta_col])
+                      or is_string_dtype(sample_meta[sample_meta_col]))
         if not is_category:
             X[sample_meta_col] = sample_meta[sample_meta_col]
             new_feature_names.append(sample_meta_col)
         elif sample_meta_col in ordinal_encoder_categories:
-            if sample_meta_col not in ordinal_encoder_categories:
-                raise RuntimeError('No ordinal encoder categories config '
-                                   'exists for {}'.format(sample_meta_col))
             if sample_meta[sample_meta_col].unique().size > 1:
                 ode = OrdinalEncoder(categories=[
                     ordinal_encoder_categories[sample_meta_col]])
@@ -142,7 +145,7 @@ def load_dataset(dataset_file):
                 sample_meta[sample_meta_col] != 'NA'].unique().size
             if num_categories > 2:
                 ohe_drop = (['NA'] if 'NA' in
-                            sample_meta[sample_meta_col].values else None)
+                           sample_meta[sample_meta_col].values else None)
                 ohe = OneHotEncoder(drop=ohe_drop, sparse=False)
                 ohe.fit(sample_meta[[sample_meta_col]])
                 new_sample_meta_cols = []
@@ -166,6 +169,7 @@ def load_dataset(dataset_file):
                 X[new_sample_meta_col] = ohe.transform(
                     sample_meta[[sample_meta_col]])
                 new_feature_names.append(new_sample_meta_col)
+    # Create feature metadata for new columns
     new_feature_meta = pd.DataFrame(index=new_feature_names)
     for feature_meta_col in feature_meta.columns:
         if (is_categorical_dtype(feature_meta[feature_meta_col])
@@ -183,6 +187,46 @@ def load_dataset(dataset_file):
             sample_meta, feature_meta)
 
 
+def handle_model_type(args, analysis):
+    """
+    Validate and adjust model type based on analysis type to ensure compatibility.
+    
+    Parameters:
+    -----------
+    args : argparse.Namespace
+        The command-line arguments
+    analysis : str
+        The analysis type ('surv' or 'resp')
+        
+    Returns:
+    --------
+    str
+        The validated/adjusted model type
+    """
+    # Define valid model types for each analysis
+    survival_models = ['cnet', 'rsf', 'svm']
+    response_models = ['rfe', 'lgr', 'edger', 'limma', 'rf', 'gb']
+    
+    # Handle survival analysis
+    if analysis == 'surv':
+        if args.model_type not in survival_models:
+            print(f"Warning: Model type '{args.model_type}' is not compatible with survival analysis.")
+            print(f"Using default survival model: 'cnet'")
+            return 'cnet'
+        return args.model_type
+    
+    # Handle drug response analysis
+    elif analysis == 'resp':
+        if args.model_type not in response_models:
+            print(f"Warning: Model type '{args.model_type}' is not compatible with drug response analysis.")
+            print(f"Using default response model: 'lgr'")
+            return 'lgr'
+        return args.model_type
+    
+    # For any other analysis type
+    return args.model_type
+
+
 def get_col_trf_col_grps(X, col_trf_pat_grps):
     X_ct = X.copy()
     col_trf_col_grps = []
@@ -195,14 +239,36 @@ def get_col_trf_col_grps(X, col_trf_pat_grps):
     return col_trf_col_grps
 
 
-def setup_pipe_and_param_grid(X):
+def setup_pipe_and_param_grid_kraken(X):
+    """
+    Set up the pipeline and parameter grid for kraken metagenomics data.
+    This function is extracted from the original setup_pipe_and_param_grid function
+    but only contains the parts relevant to 'kraken' data type.
+    """
+    # Define parameter ranges
     clf_c = np.logspace(-5, 3, 9)
     l1_ratio = np.array([0.1, 0.3, 0.5, 0.7, 0.8, 0.9, 0.95, 0.99, 1.])
     skb_k = np.insert(np.linspace(2, 400, num=200, dtype=int), 0, 1)
-    sfm_c = (np.logspace(-2, 3, 6) if data_type == 'kraken' else
-             np.logspace(-2, 1, 4))
-    # drug response: svm-rfe
-    if args.model_type == 'rfe':
+    sfm_c = np.logspace(-2, 3, 6)  # for kraken data
+    
+    # Set up pipeline based on analysis type and model_type
+    # SURVIVAL ANALYSIS for kraken data
+    if analysis == 'surv':
+        pipe = ExtendedPipeline(
+            memory=memory,
+            param_routing={'srv1': ['feature_meta']},
+            steps=[
+                ('trf0', StandardScaler()),
+                ('srv1', MetaCoxnetSurvivalAnalysis(
+                    estimator=CachedExtendedCoxnetSurvivalAnalysis(
+                        alpha_min_ratio=0.01, fit_baseline_model=True,
+                        max_iter=1000000, memory=memory, n_alphas=100,
+                        penalty_factor_meta_col=penalty_factor_meta_col,
+                        normalize=False, penalty_factor=None)))])
+        param_grid_dict = {'srv1__estimator__l1_ratio': l1_ratio}
+    
+    # RFE model for kraken data
+    elif args.model_type == 'rfe':
         pipe = ExtendedPipeline(
             memory=memory,
             param_routing={'clf1': ['feature_meta', 'sample_weight']},
@@ -219,8 +285,9 @@ def setup_pipe_and_param_grid(X):
                     tuning_step=1))])
         param_grid_dict = {'clf1__estimator__C': clf_c,
                            'clf1__n_features_to_select': skb_k}
-    # drug response: elasticnet logistic regression
-    if args.model_type == 'lgr':
+    
+    # Logistic regression (elasticnet) for kraken data
+    elif args.model_type == 'lgr':
         col_trf_col_grps = get_col_trf_col_grps(
             X, [['^(?!gender_male|age_at_diagnosis|tumor_stage).*$',
                  '^(?:gender_male|age_at_diagnosis|tumor_stage)$']])
@@ -265,8 +332,9 @@ def setup_pipe_and_param_grid(X):
             'clf1__C': clf_c,
             'trf0__trf0__slr1__estimator__C': sfm_c,
             'trf0__trf0__slr1__estimator__l1_ratio': l1_ratio}
-   # drug response: limma/edgeR L2 logistic regression
-    if args.model_type == 'limma' or args.model_type == 'edgeR':
+    
+    # limma for kraken data (default if model type is edger/limma)
+    else:
         col_trf_col_grps = get_col_trf_col_grps(
             X, [['^(?!gender_male|age_at_diagnosis|tumor_stage).*$']])
         pipe = ExtendedPipeline(
@@ -297,6 +365,7 @@ def setup_pipe_and_param_grid(X):
                     solver='saga'))])
         param_grid_dict = {'clf2__C': clf_c,
                            'trf0__trf0__slr0__k': skb_k}
+    
     param_grid = [param_grid_dict.copy()]
     return pipe, param_grid, param_grid_dict
 
@@ -405,16 +474,6 @@ def get_final_feature_meta(pipe, feature_meta):
     for estimator in pipe:
         feature_meta = transform_feature_meta(estimator, feature_meta)
     final_estimator = pipe[-1]
-#    if isinstance(final_estimator, MetaCoxnetSurvivalAnalysis):
-#        feature_weights = final_estimator.coef_
-#        feature_weights = np.ravel(feature_weights)
-#        feature_mask = feature_weights != 0
-#        if penalty_factor_meta_col in feature_meta.columns:
-#            feature_mask[feature_meta[penalty_factor_meta_col] == 0] = True
-#        feature_meta = feature_meta.copy()
-#        feature_meta = feature_meta.loc[feature_mask]
-#        feature_meta['Weight'] = feature_weights[feature_mask]
-#    else:
     feature_weights = explain_weights_df(
         final_estimator, feature_names=feature_meta.index.values)
     if feature_weights is None and hasattr(final_estimator, 'estimator_'):
@@ -551,98 +610,6 @@ def plot_param_cv_metrics(model_name, param_grid_dict, param_cv_scores):
         plt.tick_params(labelsize=args.axis_font_size)
         plt.grid(True, alpha=0.3)
 
-'''
-def get_coxnet_max_num_alphas(search):
-    param_combos = ParameterGrid(search.param_grid)
-    max_num_alphas = 0
-    pipe = search.estimator
-    srv_step_name = pipe.steps[-1][0]
-    cnet_srv_n_param = '{}__estimator__n_alphas'.format(srv_step_name)
-    for params in param_combos:
-        if (isinstance(pipe[-1], MetaCoxnetSurvivalAnalysis)
-                or (srv_step_name in params and isinstance(
-                    params[srv_step_name], MetaCoxnetSurvivalAnalysis))):
-            max_num_alphas = max(max_num_alphas,
-                                 params[cnet_srv_n_param]
-                                 if cnet_srv_n_param in params else
-                                 params[srv_step_name].estimator.n_alphas
-                                 if srv_step_name in params else
-                                 pipe[-1].estimator.n_alphas)
-    return max_num_alphas
-
-
-def add_coxnet_alpha_param_grid(search, X, y, pipe_fit_params):
-    cnet_pipes = []
-    param_combos = ParameterGrid(search.param_grid)
-    pipe = search.estimator
-    srv_step_name = pipe.steps[-1][0]
-#    for params in param_combos:
-#        if (isinstance(pipe[-1], MetaCoxnetSurvivalAnalysis)
-#                or (srv_step_name in params and isinstance(
-#                    params[srv_step_name], MetaCoxnetSurvivalAnalysis))):
-#            cnet_pipe = clone(pipe)
-#            cnet_pipe.set_params(**params)
-#            cnet_pipe.steps[-1] = (srv_step_name, cnet_pipe[-1].estimator)
-#            for param in cnet_pipe.get_params(deep=True).keys():
-#                param_parts = param.split('__')
-#                if param_parts[-1] == 'fit_baseline_model':
-#                    cnet_pipe.set_params(**{param: False})
-#            cnet_pipes.append(cnet_pipe)
-#    print('Generating CoxnetSurvivalAnalysis alpha path for {} pipeline{}'
-#          .format(len(cnet_pipes), 's' if len(cnet_pipes) > 1 else ''),
-#          flush=True, end='\n' if args.scv_verbose > 0 else ' ')
-    fitted_cnet_pipes = Parallel(
-        backend=args.parallel_backend, n_jobs=args.n_jobs,
-        verbose=args.scv_verbose)(
-            delayed(fit_pipeline)(X, y, cnet_pipe.steps, params=None,
-                                  param_routing=cnet_pipe.param_routing,
-                                  fit_params=pipe_fit_params)
-            for cnet_pipe in cnet_pipes)
-    if args.scv_verbose == 0:
-        print(flush=True)
-    if all(p is None for p in fitted_cnet_pipes):
-        raise RuntimeError('All CoxnetSurvivalAnalysis alpha path pipelines '
-                           'failed')
-    param_grid = []
-    cnet_pipes_idx = 0
-    cnet_srv_a_param = '{}__alpha'.format(srv_step_name)
-    for params in param_combos:
-        param_grid.append({k: [v] for k, v in params.items()})
- #       if (isinstance(pipe[-1], MetaCoxnetSurvivalAnalysis)
- #               or (srv_step_name in params and isinstance(
- #                   params[srv_step_name], MetaCoxnetSurvivalAnalysis))):
- #           if fitted_cnet_pipes[cnet_pipes_idx] is not None:
- #               param_grid[-1][cnet_srv_a_param] = (
- #                   fitted_cnet_pipes[cnet_pipes_idx][-1].alphas_)
- #           else:
-  #              del param_grid[-1]
- #           cnet_pipes_idx += 1
-    search.set_params(param_grid=param_grid)
-    if args.verbose > 1:
-        print('Param grid:')
-        pprint(param_grid)
-    return search
-
-
-def update_coxnet_param_grid_dict(search, param_grid_dict):
-    pipe = search.estimator
-    srv_step_name = pipe.steps[-1][0]
-    cnet_srv_a_param = '{}__alpha'.format(srv_step_name)
-    cnet_srv_l_param = '{}__estimator__l1_ratio'.format(srv_step_name)
-    cnet_srv_n_param = '{}__estimator__n_alphas'.format(srv_step_name)
-    if any(p in search.best_params_ for p in (cnet_srv_l_param,
-                                              cnet_srv_n_param)):
-        best_alpha_condition = {k: v for k, v in search.best_params_.items()
-                                if k in (cnet_srv_l_param, cnet_srv_n_param)}
-        param_grid_dict[cnet_srv_a_param] = list(filter(
-            lambda params: all(params[k] == [v] for k, v in
-                               best_alpha_condition.items()),
-            search.param_grid))[0][cnet_srv_a_param]
-    else:
-        param_grid_dict[cnet_srv_a_param] = (
-            search.param_grid[0][cnet_srv_a_param])
-    return param_grid_dict
-'''
 
 def unset_pipe_memory(pipe):
     for param, param_value in pipe.get_params(deep=True).items():
@@ -1186,6 +1153,29 @@ def dir_path(path):
     return path
 
 
+def update_parser_with_new_models(parser):
+    """
+    Update the existing argument parser to include the new model types
+    """
+    # Update the model-type choices to include new models
+    for action in parser._actions:
+        if action.dest == 'model_type':
+            # Save the existing help text
+            help_text = action.help
+            # Remove the old action
+            parser._actions.remove(action)
+            parser._option_string_actions.pop(action.option_strings[0])
+            # Add a new action with updated choices
+            parser.add_argument('--model-type', type=str, required=True,
+                                choices=['cnet', 'rfe', 'lgr', 'edger', 'limma', 
+                                         'rsf', 'svm', 'rf', 'gb'],
+                                help=help_text)
+            break
+    
+    return parser
+
+
+
 parser = ArgumentParser()
 parser.add_argument('--dataset', type=str, required=True, help='dataset')
 parser.add_argument('--model-type', type=str, required=True,
@@ -1226,32 +1216,22 @@ parser.add_argument('--tmp-dir', type=dir_path, default=gettempdir(),
 parser.add_argument('--verbose', type=int, default=1, help='program verbosity')
 parser.add_argument('--load-only', default=False, action='store_true',
                     help='set up model selection and load dataset only')
+                    
+parser = update_parser_with_new_models(parser)
+
 args = parser.parse_args()
+args.model_type = handle_model_type(args, analysis)
 
 file_basename = os.path.splitext(os.path.split(args.dataset)[1])[0]
 _, cancer, analysis, target, data_type, *rest = file_basename.split('_')
-#if args.model_type in ('edger', 'limma'):
-#    args.model_type = 'edger' if data_type == 'htseq' else 'limma'
-#if analysis == 'surv' and args.model_type != 'cnet':
-#    args.model_type = 'cnet'
+if args.model_type in ('edger', 'limma'):
+   args.model_type = 'edger' if data_type == 'htseq' else 'limma'
+
 
 out_dir = '{}/{}'.format(args.results_dir, analysis)
 os.makedirs(out_dir, mode=0o755, exist_ok=True)
 
 cancer_target = '_'.join([cancer, target])
-#if analysis == 'surv':
-#    metrics = ['score']
-#    test_splits = 100 if args.test_splits is None else args.test_splits
-#    test_size = 0.25 if args.test_size is None else args.test_size
-#    scv_repeats = 5 if args.scv_repeats is None else args.scv_repeats
-#    if args.scv_splits is None:
-#        scv_splits = (
-#            2 if cancer_target in ('dlbc_os', 'pcpg_os', 'tgct_os') else
-#            3 if cancer_target in ('chol_os', 'chol_pfi', 'dlbc_pfi',
-#                                   'kich_os', 'thym_os') else 4)
-#    else:
-#        scv_splits = args.scv_splits
-#else:
 metrics = ['roc_auc', 'balanced_accuracy', 'average_precision']
 scv_splits = 3 if args.scv_splits is None else args.scv_splits
 scv_repeats = 5 if args.scv_repeats is None else args.scv_repeats

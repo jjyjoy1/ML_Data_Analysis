@@ -1,0 +1,66 @@
+Model Details and Benefits
+Survival Models:
+CoxNet (original, cnet): Penalized Cox regression with elastic net regularization
+Good for identifying critical features with regularization
+Works well with high-dimensional data
+
+
+Random Survival Forest (rsf):
+Can capture non-linear relationships and interactions
+Less sensitive to outliers and doesn't require feature normalization
+Provides feature importance measures
+
+
+Survival SVM (svm):
+Good performance in high-dimensional data
+Can be more stable than Cox models for some datasets
+Rank-based formulation focuses on order of events
+
+Drug Response Models:
+RFE-SVM (original, rfe): Recursive feature elimination with SVM
+Good for selecting an optimal feature subset
+Works well with highly correlated features
+
+
+Logistic Regression (original, lgr): Elastic net regularized logistic regression
+Interpretable with weighted coefficients
+Regularization helps with feature selection
+
+
+Limma/EdgeR (original, limma/edger): Differential expression based approach
+Good for feature selection with biological relevance
+Takes into account expression variance
+
+
+Random Forest (rf):
+Robust to overfitting, especially with small sample sizes
+Can handle non-linear relationships
+Provides feature importance metrics
+
+
+Gradient Boosting (gb):
+Often provides superior predictive performance
+Robust to outliers and missing data
+Good balance of bias and variance
+
+These models provide a comprehensive set of options that can be compared to find the best approach for your specific dataset characteristics.
+
+####
+RNA-seq Specific Preprocessing:
+
+EdgeR-based Preprocessing Pipeline:
+
+The code uses EdgeR-specific preprocessing steps for RNA-seq data:
+
+EdgeRFilterByExpr: Filters out low-expressed genes
+EdgeRTMMLogCPM: Performs log-CPM normalization with TMM normalization
+
+
+Differential Expression Analysis:
+
+For feature selection, the RNA-seq pipelines use either:
+
+EdgeR: For RNA-seq data-specific differential expression analysis
+Limma: An alternative method applicable to RNA-seq data after normalization
+
+
