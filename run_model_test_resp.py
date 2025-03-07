@@ -64,11 +64,6 @@ from sklearn_extensions.model_selection import (
 from sklearn_extensions.pipeline import (ExtendedPipeline,
                                          transform_feature_meta)
 from sklearn_extensions.preprocessing import EdgeRTMMLogCPM
-from sksurv_extensions.model_selection import (
-    RepeatedSurvivalStratifiedKFold, SurvivalStratifiedShuffleSplit,
-    SurvivalStratifiedSampleFromGroupShuffleSplit)
-from sksurv_extensions.linear_model import (
-    CachedExtendedCoxnetSurvivalAnalysis, MetaCoxnetSurvivalAnalysis)
 
 
 def warning_format(message, category, filename, lineno, file=None, line=None):
@@ -594,11 +589,7 @@ def calculate_test_scores(estimator, X_test, y_test, metrics,
     if isinstance(metrics, str):
         metrics = [metrics]
     for metric in metrics:
-        if metric in ('concordance_index_censored', 'score'):
-            scores[metric] = concordance_index_censored(
-                y_test[y_test.dtype.names[0]], y_test[y_test.dtype.names[1]],
-                y_pred)[0]
-        elif metric == 'roc_auc':
+        if metric == 'roc_auc':
             scores[metric] = roc_auc_score(
                 y_test, y_score, **score_params)
             scores['fpr'], scores['tpr'], _ = roc_curve(
@@ -783,97 +774,6 @@ def plot_param_cv_metrics(model_name, param_grid_dict, param_cv_scores):
         plt.tick_params(labelsize=args.axis_font_size)
         plt.grid(True, alpha=0.3)
 
-
-def get_coxnet_max_num_alphas(search):
-    param_combos = ParameterGrid(search.param_grid)
-    max_num_alphas = 0
-    pipe = search.estimator
-    srv_step_name = pipe.steps[-1][0]
-    cnet_srv_n_param = '{}__estimator__n_alphas'.format(srv_step_name)
-    for params in param_combos:
-        if (isinstance(pipe[-1], MetaCoxnetSurvivalAnalysis)
-                or (srv_step_name in params and isinstance(
-                    params[srv_step_name], MetaCoxnetSurvivalAnalysis))):
-            max_num_alphas = max(max_num_alphas,
-                                 params[cnet_srv_n_param]
-                                 if cnet_srv_n_param in params else
-                                 params[srv_step_name].estimator.n_alphas
-                                 if srv_step_name in params else
-                                 pipe[-1].estimator.n_alphas)
-    return max_num_alphas
-
-
-def add_coxnet_alpha_param_grid(search, X, y, pipe_fit_params):
-    cnet_pipes = []
-    param_combos = ParameterGrid(search.param_grid)
-    pipe = search.estimator
-    srv_step_name = pipe.steps[-1][0]
-    for params in param_combos:
-        if (isinstance(pipe[-1], MetaCoxnetSurvivalAnalysis)
-                or (srv_step_name in params and isinstance(
-                    params[srv_step_name], MetaCoxnetSurvivalAnalysis))):
-            cnet_pipe = clone(pipe)
-            cnet_pipe.set_params(**params)
-            cnet_pipe.steps[-1] = (srv_step_name, cnet_pipe[-1].estimator)
-            for param in cnet_pipe.get_params(deep=True).keys():
-                param_parts = param.split('__')
-                if param_parts[-1] == 'fit_baseline_model':
-                    cnet_pipe.set_params(**{param: False})
-            cnet_pipes.append(cnet_pipe)
-    print('Generating CoxnetSurvivalAnalysis alpha path for {} pipeline{}'
-          .format(len(cnet_pipes), 's' if len(cnet_pipes) > 1 else ''),
-          flush=True, end='\n' if args.scv_verbose > 0 else ' ')
-    fitted_cnet_pipes = Parallel(
-        backend=args.parallel_backend, n_jobs=args.n_jobs,
-        verbose=args.scv_verbose)(
-            delayed(fit_pipeline)(X, y, cnet_pipe.steps, params=None,
-                                  param_routing=cnet_pipe.param_routing,
-                                  fit_params=pipe_fit_params)
-            for cnet_pipe in cnet_pipes)
-    if args.scv_verbose == 0:
-        print(flush=True)
-    if all(p is None for p in fitted_cnet_pipes):
-        raise RuntimeError('All CoxnetSurvivalAnalysis alpha path pipelines '
-                           'failed')
-    param_grid = []
-    cnet_pipes_idx = 0
-    cnet_srv_a_param = '{}__alpha'.format(srv_step_name)
-    for params in param_combos:
-        param_grid.append({k: [v] for k, v in params.items()})
-        if (isinstance(pipe[-1], MetaCoxnetSurvivalAnalysis)
-                or (srv_step_name in params and isinstance(
-                    params[srv_step_name], MetaCoxnetSurvivalAnalysis))):
-            if fitted_cnet_pipes[cnet_pipes_idx] is not None:
-                param_grid[-1][cnet_srv_a_param] = (
-                    fitted_cnet_pipes[cnet_pipes_idx][-1].alphas_)
-            else:
-                del param_grid[-1]
-            cnet_pipes_idx += 1
-    search.set_params(param_grid=param_grid)
-    if args.verbose > 1:
-        print('Param grid:')
-        pprint(param_grid)
-    return search
-
-
-def update_coxnet_param_grid_dict(search, param_grid_dict):
-    pipe = search.estimator
-    srv_step_name = pipe.steps[-1][0]
-    cnet_srv_a_param = '{}__alpha'.format(srv_step_name)
-    cnet_srv_l_param = '{}__estimator__l1_ratio'.format(srv_step_name)
-    cnet_srv_n_param = '{}__estimator__n_alphas'.format(srv_step_name)
-    if any(p in search.best_params_ for p in (cnet_srv_l_param,
-                                              cnet_srv_n_param)):
-        best_alpha_condition = {k: v for k, v in search.best_params_.items()
-                                if k in (cnet_srv_l_param, cnet_srv_n_param)}
-        param_grid_dict[cnet_srv_a_param] = list(filter(
-            lambda params: all(params[k] == [v] for k, v in
-                               best_alpha_condition.items()),
-            search.param_grid))[0][cnet_srv_a_param]
-    else:
-        param_grid_dict[cnet_srv_a_param] = (
-            search.param_grid[0][cnet_srv_a_param])
-    return param_grid_dict
 
 
 def unset_pipe_memory(pipe):
@@ -1480,19 +1380,7 @@ out_dir = '{}/{}'.format(args.results_dir, analysis)
 os.makedirs(out_dir, mode=0o755, exist_ok=True)
 
 cancer_target = '_'.join([cancer, target])
-#if analysis == 'surv':
-#    metrics = ['score']
-#    test_splits = 100 if args.test_splits is None else args.test_splits
-#    test_size = 0.25 if args.test_size is None else args.test_size
-#    scv_repeats = 5 if args.scv_repeats is None else args.scv_repeats
-#    if args.scv_splits is None:
-#        scv_splits = (
-#           2 if cancer_target in ('dlbc_os', 'pcpg_os', 'tgct_os') else
- #           3 if cancer_target in ('chol_os', 'chol_pfi', 'dlbc_pfi',
- #                                  'kich_os', 'thym_os') else 4)
- #   else:
- #       scv_splits = args.scv_splits
-#else:
+
 metrics = ['roc_auc', 'balanced_accuracy', 'average_precision']
 scv_splits = 3 if args.scv_splits is None else args.scv_splits
 scv_repeats = 5 if args.scv_repeats is None else args.scv_repeats

@@ -224,42 +224,8 @@ def setup_pipe_and_param_grid_rnaseq(X):
     
     # Set up pipeline based on analysis type and model_type
     # SURVIVAL ANALYSIS for RNA-seq data
-    if analysis == 'surv':
-        # Extract RNA-seq specific columns (ENSG patterns)
-        col_trf_col_grps = get_col_trf_col_grps(X, [['^ENSG.+$']])
-        
-        if args.model_type == 'cnet':
-            # CoxNet model for RNA-seq
-            pipe = ExtendedPipeline(
-                memory=memory,
-                param_routing={'srv2': ['feature_meta'],
-                               'trf0': ['sample_meta']},
-                steps=[
-                    ('trf0', ExtendedColumnTransformer(
-                        n_jobs=1,
-                        param_routing={'trf0': ['sample_meta']},
-                        remainder='passthrough',
-                        transformers=[
-                            ('trf0', ExtendedPipeline(
-                                memory=memory,
-                                param_routing={'slr0': ['sample_meta'],
-                                               'trf1': ['sample_meta']},
-                                steps=[
-                                    ('slr0', EdgeRFilterByExpr(
-                                        is_classif=False)),
-                                    ('trf1', EdgeRTMMLogCPM(
-                                        prior_count=1))]),
-                             col_trf_col_grps[0][0])])),
-                    ('trf1', StandardScaler()),
-                    ('srv2', MetaCoxnetSurvivalAnalysis(
-                        estimator=CachedExtendedCoxnetSurvivalAnalysis(
-                            alpha_min_ratio=0.01, fit_baseline_model=True,
-                            max_iter=1000000, memory=memory, n_alphas=100,
-                            penalty_factor_meta_col=penalty_factor_meta_col,
-                            normalize=False, penalty_factor=None)))])
-            param_grid_dict = {'srv2__estimator__l1_ratio': l1_ratio}
-            
-        elif args.model_type == 'rsf':
+    if analysis == 'surv':         
+        if args.model_type == 'rsf':
             # Random Survival Forest for RNA-seq
             pipe = ExtendedPipeline(
                 memory=memory,

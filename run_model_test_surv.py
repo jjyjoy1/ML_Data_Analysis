@@ -78,14 +78,32 @@ def warning_format(message, category, filename, lineno, file=None, line=None):
 def load_dataset(dataset_file):
     dataset_name, file_extension = os.path.splitext(
         os.path.split(dataset_file)[1])
-    if not os.path.isfile(dataset_file) or file_extension.lower() != '.rds':
+    if not os.path.isfile(dataset_file) or file_extension.lower() != '.h5ad':
         raise IOError('File does not exist/invalid: {}'.format(dataset_file))
-    eset = r_base.readRDS(dataset_file)
-    X = pd.DataFrame(r_base.t(r_biobase.exprs(eset)),
-                     columns=r_biobase.featureNames(eset),
-                     index=r_biobase.sampleNames(eset))
-    sample_meta = r_biobase.pData(eset)
-    y = Surv.from_dataframe('Status', 'Survival_in_days', sample_meta)
+    
+    # Import AnnData
+    import anndata as ad
+    
+    # Load AnnData object
+    adata = ad.read_h5ad(dataset_file)
+    
+    # Extract expression matrix (X)
+    X = pd.DataFrame(adata.X, columns=adata.var_names, index=adata.obs_names)
+    
+    # Extract sample metadata (obs)
+    sample_meta = adata.obs.copy()
+    
+    # Extract feature metadata (var)
+    feature_meta = adata.var.copy()
+    
+    # Handle analysis type (survival or classification)
+    if analysis == 'surv':
+        from sksurv.util import Surv
+        y = Surv.from_dataframe('Status', 'Survival_in_days', sample_meta)
+    else:
+        y = np.array(sample_meta['Class'], dtype=int)
+    
+    # Handle groups and weights if present
     if 'Group' in sample_meta.columns:
         groups = np.array(sample_meta['Group'], dtype=int)
         _, group_indices, group_counts = np.unique(
@@ -100,36 +118,31 @@ def load_dataset(dataset_file):
         groups = None
         group_weights = None
         sample_weights = None
-    try:
-        feature_meta = r_biobase.fData(eset)
-        feature_meta_category_cols = (
-            feature_meta.select_dtypes(include='category').columns)
-        feature_meta[feature_meta_category_cols] = (
-            feature_meta[feature_meta_category_cols].astype(str))
-    except ValueError:
-        feature_meta = pd.DataFrame(index=r_biobase.featureNames(eset))
-    new_feature_names = []
+    
+    # Handle penalty factor metadata
     if penalty_factor_meta_col in feature_meta.columns:
         raise RuntimeError('{} column already exists in feature_meta'
-                           .format(penalty_factor_meta_col))
+                          .format(penalty_factor_meta_col))
     feature_meta[penalty_factor_meta_col] = 1
+    
+    # Process sample metadata columns to include in X
+    new_feature_names = []
     for sample_meta_col in sample_meta_cols:
         if sample_meta_col not in sample_meta.columns:
             raise RuntimeError('{} column does not exist in sample_meta'
-                               .format(sample_meta_col))
+                              .format(sample_meta_col))
         if sample_meta_col in X.columns:
             raise RuntimeError('{} column already exists in X'
-                               .format(sample_meta_col))
+                              .format(sample_meta_col))
+        
         is_category = (is_categorical_dtype(sample_meta[sample_meta_col])
-                       or is_object_dtype(sample_meta[sample_meta_col])
-                       or is_string_dtype(sample_meta[sample_meta_col]))
+                      or is_object_dtype(sample_meta[sample_meta_col])
+                      or is_string_dtype(sample_meta[sample_meta_col]))
+        
         if not is_category:
             X[sample_meta_col] = sample_meta[sample_meta_col]
             new_feature_names.append(sample_meta_col)
         elif sample_meta_col in ordinal_encoder_categories:
-            if sample_meta_col not in ordinal_encoder_categories:
-                raise RuntimeError('No ordinal encoder categories config '
-                                   'exists for {}'.format(sample_meta_col))
             if sample_meta[sample_meta_col].unique().size > 1:
                 ode = OrdinalEncoder(categories=[
                     ordinal_encoder_categories[sample_meta_col]])
@@ -142,7 +155,7 @@ def load_dataset(dataset_file):
                 sample_meta[sample_meta_col] != 'NA'].unique().size
             if num_categories > 2:
                 ohe_drop = (['NA'] if 'NA' in
-                            sample_meta[sample_meta_col].values else None)
+                           sample_meta[sample_meta_col].values else None)
                 ohe = OneHotEncoder(drop=ohe_drop, sparse=False)
                 ohe.fit(sample_meta[[sample_meta_col]])
                 new_sample_meta_cols = []
@@ -166,6 +179,8 @@ def load_dataset(dataset_file):
                 X[new_sample_meta_col] = ohe.transform(
                     sample_meta[[sample_meta_col]])
                 new_feature_names.append(new_sample_meta_col)
+    
+    # Create feature metadata for new columns
     new_feature_meta = pd.DataFrame(index=new_feature_names)
     for feature_meta_col in feature_meta.columns:
         if (is_categorical_dtype(feature_meta[feature_meta_col])
@@ -177,11 +192,13 @@ def load_dataset(dataset_file):
             new_feature_meta[feature_meta_col] = 0
         elif is_bool_dtype(feature_meta[feature_meta_col]):
             new_feature_meta[feature_meta_col] = False
+    
     new_feature_meta[penalty_factor_meta_col] = 0
     feature_meta = feature_meta.append(new_feature_meta, verify_integrity=True)
+    
     return (dataset_name, X, y, groups, group_weights, sample_weights,
             sample_meta, feature_meta)
-
+            
 
 def get_col_trf_col_grps(X, col_trf_pat_grps):
     X_ct = X.copy()
@@ -330,6 +347,7 @@ def calculate_test_scores(estimator, X_test, y_test, metrics,
                 y_test, y_score, pos_label=1, **score_params)
             scores['pr_auc'] = auc(scores['rec'], scores['pre'])
     return scores
+
 
 
 def get_perm_test_split_data(X, perm_y, cv, cv_params=None):
