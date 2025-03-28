@@ -1,129 +1,122 @@
-This repo initial used ruppinlab published paper, and released code, and then extend to extra more ML models. 
-And convert to all code to python code, and change R ExperimentSet object to python Anndata object
+# Cancer Status Prediction Pipeline
 
-1. Define the Problem and Goals
+## Overview
+This repository builds upon work from the Ruppin Lab published paper and extends it with additional machine learning models. Key improvements include:
+- Conversion of all code from R to Python
+- Replacement of R's `ExperimentSet` object with Python's `Anndata` object
+- Integration of advanced deep learning models for robust analysis
 
-    Outcome Definition:
-    Clearly specify what “cancer status” means in your context (e.g., cancer vs. non-cancer, tumor grade, survival outcome, etc.). This will determine whether your problem is framed as a classification or regression task.
+## Pipeline Architecture
 
-    Scope:
-    Decide if you will build separate models for each data type (clinical, transcriptomic, microbiome) and/or develop an integrated (multi-modal) model that combines all three sources.
+### 1. Problem Definition
+**Outcome Definition:**
+- Clearly specify "cancer status" (e.g., cancer vs. non-cancer, tumor grade, survival outcome)
+- Determine classification vs. regression task framing
 
-    Performance Metrics:
-    Identify relevant metrics (accuracy, AUC-ROC, precision/recall, etc.) to evaluate model performance, keeping in mind class imbalances and clinical relevance.
+**Scope:**
+- Option 1: Separate models per data type (clinical, transcriptomic, microbiome)
+- Option 2: Integrated multi-modal model combining all sources
 
-2. Data Preprocessing and Cleaning
-A. Clinical Metadata
+**Performance Metrics:**
+- Standard metrics: Accuracy, AUC-ROC, precision/recall
+- Special considerations for:
+  - Class imbalances
+  - Clinical relevance
 
-    Missing Data:
-    Handle any missing values (imputation or removal) for variables like age, gender, tumor status.
-    Categorical Encoding:
-    Encode categorical variables (e.g., gender, tumor status) using one-hot encoding or label encoding.
-    Normalization/Scaling:
-    Standardize numerical variables if needed (e.g., age).
+### 2. Data Preprocessing
+#### A. Clinical Metadata
+| Task               | Approach                          |
+|--------------------|-----------------------------------|
+| Missing Data       | Imputation or removal            |
+| Categorical Encoding | One-hot or label encoding       |
+| Normalization      | Standardize numerical variables  |
 
-B. RNA Sequence Data (Expression Table)
+#### B. RNA Sequence Data
+- **Normalization:** TPM, FPKM, or DESeq2's VST
+- **Filtering:** Remove lowly expressed genes
+- **Transformation:** Log-transform skewed distributions
 
-    Normalization:
-    RNA-seq data often require normalization (e.g., TPM, FPKM, or methods like DESeq2’s variance-stabilizing transformation) to correct for library size and other technical effects.
-    Filtering:
-    Remove lowly expressed genes to reduce noise and dimensionality.
-    Log-Transformation:
-    Consider log-transforming the data if expression distributions are skewed.
+#### C. Metagenomics Taxonomy Data
+- **Normalization:** Relative abundances or CLR transformation
+- **Dimensionality Reduction:** Filter rare taxa or cluster related features
 
-C. Metagenomics Taxonomy Data
+### 3. Exploratory Data Analysis (EDA)
+- **Univariate Analysis:** Feature distributions
+- **Correlation Analysis:** Clinical-omics relationships
+- **Visualization:** PCA, t-SNE, UMAP for sample clustering
 
-    Normalization:
-    Normalize counts to relative abundances (or use methods like centered log-ratio transformation) to account for compositionality.
-    Dimensionality Reduction:
-    The taxonomy table might be high-dimensional; consider filtering out very rare taxa or using clustering to summarize related features.
+### 4. Feature Engineering
+**Clinical Data:**
+- Create composite variables (e.g., age groups)
 
-3. Exploratory Data Analysis (EDA)
+**Omics Data:**
+- Feature selection (differential expression analysis)
+- Dimensionality reduction (PCA, autoencoders, LASSO)
+- Biological context aggregation (pathways, taxonomies)
 
-    Univariate Analysis:
-    Visualize distributions of individual features from each data source.
-    Correlation Analysis:
-    Identify relationships among clinical variables, and between clinical and omics features.
-    Data Integration Visualization:
-    Use techniques like PCA, t-SNE, or UMAP on the high-dimensional RNA and taxonomy data to understand sample clustering and variance structure.
+**Integration Strategies:**
+| Type              | Description                      |
+|-------------------|----------------------------------|
+| Early Integration | Concatenate all feature vectors  |
+| Late Integration  | Ensemble separate model outputs  |
 
-4. Feature Engineering and Selection
+### 5. Model Development
+#### A. Algorithm Selection
+**Classical ML:**
+- Random Forests, SVM, XGBoost, LightGBM
+- Regularized Logistic Regression
 
-    Clinical Data:
-    You might create composite variables (e.g., age groups) if they better capture risk.
+**Deep Learning:**
+- Multi-layer perceptrons
+- Multi-modal architectures
+- **Extended Models:**
+  - VAEs
+  - MOLI
+  - DeepOmix
+  - MoGN
 
-    Omics Data (RNA and Metagenomics):
-        Feature Selection:
-        Use statistical tests (e.g., differential expression analysis, univariate tests for microbiome features) to shortlist relevant features.
-        Dimensionality Reduction:
-        Techniques such as PCA, autoencoders, or even regularization methods (LASSO) can help reduce feature dimensionality before model training.
-        Biological Context:
-        Leverage known pathways or taxonomic hierarchies to aggregate features if that makes biological sense.
+#### B. Training Process
+- **Data Splitting:** Stratified train/validation/test
+- **Cross-Validation:** k-fold for robust estimation
+- **Hyperparameter Tuning:** Grid/Random/Bayesian search
 
-    Data Integration Strategies:
-        Early Integration (Feature-Level Fusion):
-        Concatenate normalized features from all sources into a single feature vector for each patient.
-        Intermediate/Late Integration (Model-Level Fusion):
-        Train separate models on each data type and combine predictions (e.g., via ensemble learning or meta-modeling).
+### 6. Model Evaluation
+**Performance Metrics:**
+- Standard: AUC, accuracy
+- Imbalanced data: F1-score, sensitivity/specificity
 
-5. Model Selection and Development
-A. Choose Algorithms
+**Interpretability:**
+- Feature importance scores
+- SHAP/LIME explanations
+- Biological enrichment analysis
 
-    Classical ML Algorithms:
-    Random Forests, Support Vector Machines (SVM), Gradient Boosting (e.g., XGBoost, LightGBM) are robust and can handle heterogeneous data.
-    Regularized Logistic Regression:
-    Good for binary classification with high-dimensional data (with LASSO or Ridge).
-    Neural Networks:
-    Deep learning models (e.g., multi-layer perceptrons) can capture complex nonlinear relationships, particularly useful if you have a large sample size and many features.
-    Multi-modal Architectures:
-    If you decide to integrate data modalities in a deep learning framework, consider architectures that have separate branches for each data type that are then merged.
-    I added more deep learning model for robust data analysis, e.g VAEs, MOLI, DeepOmix and MoGN models, and also attached the detai
-ls document for each model usage.
+### 7. Validation & Deployment
+**Validation Strategy:**
+1. Internal: Held-out test set
+2. External: Independent dataset
+3. Clinical: Expert consultation
 
-B. Model Training
+**Deployment Considerations:**
+- Data collection feasibility
+- Processing time requirements
+- Interpretation needs
 
-    Data Splitting:
-    Split your dataset into training, validation, and test sets. Consider stratified splits if class distributions are imbalanced.
-    Cross-Validation:
-    Use k-fold cross-validation to robustly estimate model performance and avoid overfitting.
+### 8. Iterative Refinement
+- Cycle through feature/model tuning
+- Documentation with:
+  - Jupyter notebooks
+  - Version control (Git)
+  - Workflow systems (Snakemake/Nextflow)
 
-C. Hyperparameter Tuning
+## Summary Workflow
+1. Clearly define prediction task and metrics
+2. Preprocess each data type appropriately
+3. Conduct thorough EDA
+4. Engineer and select meaningful features
+5. Train and validate models systematically
+6. Interpret results biologically and clinically
+7. Prepare for potential clinical implementation
 
-    Use grid search, random search, or Bayesian optimization techniques to optimize your model parameters.
-
-6. Model Evaluation and Interpretation
-
-    Performance Metrics:
-    Evaluate models using appropriate metrics (e.g., AUC, accuracy, sensitivity/specificity). For imbalanced classes, metrics like F1-score and AUC-ROC can be more informative.
-    Interpretability:
-        Use feature importance scores (e.g., from Random Forests) or SHAP/LIME for model interpretability.
-        For omics data, biological interpretability (e.g., gene/pathway enrichment analysis) is often as important as predictive performance.
-
-7. Validation and External Testing
-
-    Internal Validation:
-    After model tuning, validate performance on a held-out test set.
-    External Validation:
-    If possible, test your model on an independent dataset to assess its generalizability.
-    Clinical Relevance:
-    Ensure that the model’s predictions make sense clinically and statistically, and consider consultation with domain experts.
-
-8. Iterative Refinement and Deployment
-
-    Model Refinement:
-    Iterate over feature selection, algorithm tuning, and integration strategies based on performance and feedback.
-    Deployment Considerations:
-    Think about how the model would be implemented in a clinical setting: ease of data collection, processing time, and interpretability are key factors.
-    Documentation and Reproducibility:
-    Document your analysis pipeline using tools like Jupyter notebooks, version control (Git), and workflow management systems (e.g., Snakemake or Nextflow).
-
-Summary
-
-    Define the problem clearly (what is “cancer status” and what are your performance goals).
-    Preprocess each dataset individually (clinical, RNA-seq, metagenomics), handling normalization, missing values, and dimensionality issues.
-    Conduct exploratory data analysis (EDA) to understand your data and guide feature engineering.
-    Select and engineer features (and consider both early and late data integration strategies).
-    Choose and train machine learning models using techniques like cross-validation and hyperparameter tuning.
-    Evaluate and interpret model performance, considering both statistical and biological/clinical insights.
-    Iterate and validate using external datasets if available, preparing your model for potential clinical use.
+## Extended Documentation
+For details on each added deep learning model (VAEs, MOLI, DeepOmix, MoGN), please see the respective model documentation files.
 
