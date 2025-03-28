@@ -1,4 +1,4 @@
-This repo used ruppinlab published paper, and released code, and extend to extra ML models. 
+This repo initial used ruppinlab published paper, and released code, and then extend to extra more ML models. 
 And convert to all code to python code, and change R ExperimentSet object to python Anndata object
 
 1. Define the Problem and Goals
@@ -77,6 +77,8 @@ A. Choose Algorithms
     Deep learning models (e.g., multi-layer perceptrons) can capture complex nonlinear relationships, particularly useful if you have a large sample size and many features.
     Multi-modal Architectures:
     If you decide to integrate data modalities in a deep learning framework, consider architectures that have separate branches for each data type that are then merged.
+    I added more deep learning model for robust data analysis, e.g VAEs, MOLI, DeepOmix and MoGN models, and also attached the detai
+ls document for each model usage.
 
 B. Model Training
 

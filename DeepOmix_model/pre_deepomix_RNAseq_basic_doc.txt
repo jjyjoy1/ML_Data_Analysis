@@ -1,0 +1,95 @@
+Preparing pathway databases for use in models like DeepOmix involves mapping your gene expression data to biological pathways (e.g., KEGG, Reactome, Gene Ontology) and structuring these relationships into a format compatible with your model (e.g., a gene-pathway membership matrix). Here's a step-by-step guide:
+
+Step 1: Choose Pathway Databases
+
+Select databases that align with your organism and research question. Common options:
+
+KEGG Pathways: Curated metabolic/signaling pathways (e.g., hsa00010 for human glycolysis).
+Reactome: Detailed human biological processes.
+Gene Ontology (GO): Broad functional terms (e.g., "immune response").
+MSigDB: Collections like Hallmark gene sets or curated pathways.
+WikiPathways: Community-curated pathways.
+
+Tools to Access Pathways:
+
+gseapy (Python): Fetch pathways from MSigDB, KEGG, Reactome, etc.
+BioMart/Ensembl: Convert gene IDs to pathway annotations.
+clusterProfiler (R): Pathway enrichment and ID mapping.
+
+Step 2: Map Gene Identifiers
+
+Pathway databases use specific gene identifiers (e.g., Entrez, Ensembl, HGNC symbols). Ensure your expression data’s gene IDs match the pathway database’s format.
+
+Example Workflow:
+
+Input: Normalized expression matrix with gene symbols (e.g., TP53, EGFR).
+Convert IDs:
+Use tools like MyGene.info (Python) or org.Hs.eg.db (R) to map gene symbols to Entrez/Ensembl IDs.
+Example Python code using mygene:
+'''
+import mygene
+
+mg = mygene.MyGeneInfo()
+gene_symbols = ['TP53', 'EGFR', 'BRCA1']
+result = mg.querymany(gene_symbols, scopes='symbol', fields='entrezgene', species='human')
+# Output: Map symbols to Entrez IDs (e.g., TP53 → 7157)
+'''
+
+Step 3: Build a Gene-Pathway Membership Matrix
+Create a binary matrix where rows = genes, columns = pathways, and 1 indicates a gene belongs to a pathway.
+
+Example Code Using gseapy:
+'''
+import gseapy as gp
+import pandas as pd
+
+# Fetch KEGG pathways for human
+pathway_db = 'KEGG_2021_Human'
+pathways = gp.get_library(name=pathway_db)
+# Create a gene-pathway matrix
+genes = [...]  # List of your gene IDs (e.g., Entrez)
+pathway_mask = pd.DataFrame(0, index=genes, columns=pathways.keys())
+
+for pathway, gene_list in pathways.items():
+    pathway_mask.loc[pathway_mask.index.isin(gene_list), pathway] = 1
+
+# Save as a CSV or use directly in DeepOmix
+pathway_mask.to_csv('gene_pathway_matrix.csv')
+'''
+
+Step 4: Validate Coverage
+Ensure your expression data’s genes are sufficiently covered by the pathways. For example:
+'''
+coverage = pathway_mask.sum(axis=1)  # Number of pathways each gene belongs to
+print(f"Genes not in any pathway: {len(coverage[coverage == 0])}")
+print(f"Median pathways per gene: {coverage.median()}")
+'''
+
+Solutions for Poor Coverage:
+
+Combine multiple databases (e.g., KEGG + Reactome + GO).
+Use hierarchical pathways (e.g., GO terms with parent-child relationships).
+Filter out genes not in any pathway (if necessary).
+
+Step 5: Integrate with DeepOmix
+Load the gene-pathway matrix as a mask to constrain connections in the model’s first layer (as shown in the earlier code example).
+'''
+import torch
+# Load the gene-pathway matrix
+pathway_mask_df = pd.read_csv('gene_pathway_matrix.csv', index_col=0)
+pathway_mask_tensor = torch.tensor(pathway_mask_df.values, dtype=torch.float32)
+
+# Initialize DeepOmix with the mask
+model = DeepOmix(
+    n_genes=pathway_mask_df.shape[0],
+    n_pathways=pathway_mask_df.shape[1],
+    pathway_mask=pathway_mask_tensor
+)
+'''
+
+
+
+
+
+
+
